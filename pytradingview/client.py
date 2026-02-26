@@ -241,6 +241,9 @@ class Client():
                 continue
 
             if packet.get('m') == 'protocol_error': # Error
+                if self.quote and self.quote.on_protocol_error(packet.get('p')):
+                    self.handle_error('Recoverable protocol error:', packet['p'])
+                    continue
                 self.handle_error('Client critical error:', packet['p'])
                 self.wsapp.close()
                 continue

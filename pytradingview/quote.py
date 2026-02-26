@@ -40,6 +40,8 @@ quote_session = QuoteSession(client_bridge)
 quote_session.set_up_quote({'fields': 'price'})
 """
 
+import time
+
 from .utils import genSessionID
 
 
@@ -88,6 +90,9 @@ class QuoteSession:
         self.__session_id = genSessionID('qs')
         self.__client = client_bridge
         self.__symbol_listeners = {}
+        self.__fields = []
+        self.__subscriptions = {}
+        self.__last_recover_ts = 0.0
 
     @property
     def session_id(self):
@@ -113,6 +118,11 @@ class QuoteSession:
 
         for symbol in normalized:
             self.__symbol_listeners.setdefault(symbol, [])
+            prev = self.__subscriptions.get(symbol) or {}
+            self.__subscriptions[symbol] = {
+                "fast": bool(fast or prev.get("fast")),
+                "force_permission": bool(force_permission or prev.get("force_permission", False)),
+            }
             payload = [self.__session_id, symbol]
             if force_permission:
                 payload.append({"flags": ["force_permission"]})
@@ -127,6 +137,7 @@ class QuoteSession:
         Unsubscribe a symbol from the active quote session.
         """
         self.__symbol_listeners.pop(symbol, None)
+        self.__subscriptions.pop(symbol, None)
         self.__client['send']('quote_remove_symbols', [self.__session_id, symbol])
 
     def on_data_q(self, packet):
@@ -209,14 +220,13 @@ class QuoteSession:
 
         self.__client['sessions'][self.__session_id] = {'type':'quote', 'onData':self.on_data_q}
 
-        fields = (options.get('customFields') if options.get('customFields') and
-                  (len(options.get('customFields')) > 0)
-                  else
-                    get_quote_fields(options.get('fields'))
+        self.__fields = (
+            options.get('customFields')
+            if options.get('customFields') and (len(options.get('customFields')) > 0)
+            else get_quote_fields(options.get('fields'))
         )
 
-        self.__client['send']('quote_create_session', [self.__session_id])
-        self.__client['send']('quote_set_fields', [self.__session_id]+[fields])
+        self._send_create_and_fields()
 
         quote_session = {
             'sessionID': self.__session_id,
@@ -224,6 +234,44 @@ class QuoteSession:
             # 'send': lambda t, p: self.__client['send'](t, p),
             'send': self.__client['send'],
         }
+
+    def _send_create_and_fields(self):
+        self.__client['sessions'][self.__session_id] = {'type': 'quote', 'onData': self.on_data_q}
+        self.__client['send']('quote_create_session', [self.__session_id])
+        if self.__fields:
+            self.__client['send']('quote_set_fields', [self.__session_id] + [self.__fields])
+
+    def _replay_subscriptions(self):
+        for symbol, opts in list(self.__subscriptions.items()):
+            payload = [self.__session_id, symbol]
+            if opts.get("force_permission"):
+                payload.append({"flags": ["force_permission"]})
+            self.__client['send']('quote_add_symbols', payload)
+            if opts.get("fast"):
+                self.__client['send']('quote_fast_symbols', [self.__session_id, symbol])
+
+    def recover_unknown_session(self):
+        now = time.monotonic()
+        # Prevent tight recovery loops if the server keeps rejecting the quote session.
+        if now - self.__last_recover_ts < 0.25:
+            return False
+        self.__last_recover_ts = now
+        self._send_create_and_fields()
+        self._replay_subscriptions()
+        return True
+
+    def on_protocol_error(self, payload):
+        try:
+            err_text = " ".join(str(item) for item in (payload or []))
+        except Exception:
+            err_text = str(payload)
+        if "unknown_session_id" not in err_text:
+            return False
+        if "quote_add_symbols" not in err_text and "quote_fast_symbols" not in err_text:
+            return False
+        if self.__session_id not in err_text:
+            return False
+        return self.recover_unknown_session()
 
     def delete(self):
         """
@@ -239,4 +287,5 @@ class QuoteSession:
         """
 
         self.__client['send']('quote_delete_session', [self.__session_id])
-        del self.__client['sessions'][self.__session_id]
+        if self.__session_id in self.__client['sessions']:
+            del self.__client['sessions'][self.__session_id]
