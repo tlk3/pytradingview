@@ -40,6 +40,7 @@ quote_session = QuoteSession(client_bridge)
 quote_session.set_up_quote({'fields': 'price'})
 """
 
+import re
 import time
 
 from .utils import genSessionID
@@ -94,6 +95,7 @@ class QuoteSession:
         self.__subscriptions = {}
         self.__last_recover_ts = 0.0
         self.__pending_subscriptions = set()
+        self.__force_permission_downgraded = set()
 
     @property
     def session_id(self):
@@ -106,7 +108,7 @@ class QuoteSession:
         listeners = self.__symbol_listeners.setdefault(symbol, [])
         listeners.append(callback)
 
-    def add_symbols(self, symbols, fast: bool = True, force_permission: bool = True):
+    def add_symbols(self, symbols, fast: bool = True, force_permission: bool = False):
         """
         Subscribe one or more symbols to the active quote session.
         """
@@ -122,7 +124,7 @@ class QuoteSession:
             prev = self.__subscriptions.get(symbol) or {}
             self.__subscriptions[symbol] = {
                 "fast": bool(fast or prev.get("fast")),
-                "force_permission": bool(force_permission or prev.get("force_permission", False)),
+                "force_permission": bool(force_permission),
             }
             self.__pending_subscriptions.add(symbol)
 
@@ -271,6 +273,16 @@ class QuoteSession:
         self.__pending_subscriptions.update(self.__subscriptions.keys())
         self.flush_subscriptions()
 
+    def _extract_error_symbol(self, err_text: str):
+        try:
+            matches = re.findall(r'<<\"([^\"]+)\"?>>', err_text)
+        except Exception:
+            return None
+        for token in matches:
+            if ":" in token or "!" in token:
+                return token
+        return None
+
     def recover_unknown_session(self):
         now = time.monotonic()
         # Prevent tight recovery loops if the server keeps rejecting the quote session.
@@ -292,6 +304,17 @@ class QuoteSession:
             return False
         if self.__session_id not in err_text:
             return False
+        symbol = self._extract_error_symbol(err_text)
+        if (
+            symbol
+            and symbol in self.__subscriptions
+            and self.__subscriptions.get(symbol, {}).get("force_permission")
+            and symbol not in self.__force_permission_downgraded
+        ):
+            # Some symbols (for example certain futures) can cause quote session churn when
+            # force_permission is requested. Retry once without the flag before escalating.
+            self.__subscriptions[symbol]["force_permission"] = False
+            self.__force_permission_downgraded.add(symbol)
         return self.recover_unknown_session()
 
     def delete(self):
