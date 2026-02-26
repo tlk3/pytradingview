@@ -131,6 +131,9 @@ class QuoteSession:
         self.flush_subscriptions()
 
     def flush_subscriptions(self):
+        can_send_quote_subscriptions = self.__client.get('can_send_quote_subscriptions')
+        if callable(can_send_quote_subscriptions) and not can_send_quote_subscriptions():
+            return
         is_open = self.__client.get('is_open')
         is_logged = self.__client.get('is_logged')
         if callable(is_open) and not is_open():
@@ -315,6 +318,8 @@ class QuoteSession:
             # force_permission is requested. Retry once without the flag before escalating.
             self.__subscriptions[symbol]["force_permission"] = False
             self.__force_permission_downgraded.add(symbol)
+            return self.recover_unknown_session()
+
         return self.recover_unknown_session()
 
     def delete(self):

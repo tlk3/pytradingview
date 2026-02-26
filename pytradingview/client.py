@@ -28,6 +28,7 @@ class Client():
         self.wsapp = None
         self.__logged = False
         self.__is_opened = False
+        self.__post_login_messages = 0
         self.__send_queue = []
         self.sessions = {}
         self.__auth_token = auth_token or GUEST_AUTH_TOKEN
@@ -38,6 +39,7 @@ class Client():
             'end': self.end,
             'is_open': self.is_open,
             'is_logged': self.is_logged,
+            'can_send_quote_subscriptions': self.can_send_quote_subscriptions,
         }
 
         self.quote = QuoteSession(self.client_bridge)
@@ -152,6 +154,15 @@ class Client():
             bool: True if open, False otherwise.
         """
         return self.__is_opened
+
+    def can_send_quote_subscriptions(self):
+        """
+        Quote subscriptions are only sent after login and after at least one
+        subsequent websocket message. This avoids a TradingView race where
+        quote_add_symbols can reach the server before quote_create_session is
+        fully registered.
+        """
+        return self.__is_opened and self.__logged and self.__post_login_messages > 0
 
     @property
     def auth_token(self):
@@ -281,7 +292,11 @@ class Client():
         self.parse_packet(message)
         if not self.__logged and self.__is_opened:
             self.__logged = True
+            self.__post_login_messages = 0
             self.send_queue()
+            return
+        if self.__logged and self.__is_opened:
+            self.__post_login_messages += 1
             try:
                 self.quote.flush_subscriptions()
             except Exception:
@@ -298,6 +313,7 @@ class Client():
         """
         self.__logged = False
         self.__is_opened = False
+        self.__post_login_messages = 0
         self.handle_event('disconnected', ws, close_status_code, close_msg)
 
     def on_open(self, ws):
