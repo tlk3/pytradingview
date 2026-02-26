@@ -36,6 +36,8 @@ class Client():
             'sessions': self.sessions,
             'send': self.send,
             'end': self.end,
+            'is_open': self.is_open,
+            'is_logged': self.is_logged,
         }
 
         self.quote = QuoteSession(self.client_bridge)
@@ -280,6 +282,10 @@ class Client():
         if not self.__logged and self.__is_opened:
             self.__logged = True
             self.send_queue()
+            try:
+                self.quote.flush_subscriptions()
+            except Exception:
+                pass
 
     def on_close(self, ws, close_status_code, close_msg):
         """

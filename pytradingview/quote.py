@@ -93,6 +93,7 @@ class QuoteSession:
         self.__fields = []
         self.__subscriptions = {}
         self.__last_recover_ts = 0.0
+        self.__pending_subscriptions = set()
 
     @property
     def session_id(self):
@@ -123,13 +124,37 @@ class QuoteSession:
                 "fast": bool(fast or prev.get("fast")),
                 "force_permission": bool(force_permission or prev.get("force_permission", False)),
             }
+            self.__pending_subscriptions.add(symbol)
+
+        self.flush_subscriptions()
+
+    def flush_subscriptions(self):
+        is_open = self.__client.get('is_open')
+        is_logged = self.__client.get('is_logged')
+        if callable(is_open) and not is_open():
+            return
+        if callable(is_logged) and not is_logged():
+            return
+        if not self.__pending_subscriptions:
+            return
+
+        normalized = [s for s in self.__subscriptions.keys() if s in self.__pending_subscriptions]
+        if not normalized:
+            return
+
+        for symbol in normalized:
+            opts = self.__subscriptions.get(symbol) or {}
             payload = [self.__session_id, symbol]
-            if force_permission:
+            if opts.get("force_permission"):
                 payload.append({"flags": ["force_permission"]})
             self.__client['send']('quote_add_symbols', payload)
 
-        if fast:
-            for symbol in normalized:
+        for symbol in normalized:
+            self.__pending_subscriptions.discard(symbol)
+
+        for symbol in normalized:
+            opts = self.__subscriptions.get(symbol) or {}
+            if opts.get("fast"):
                 self.__client['send']('quote_fast_symbols', [self.__session_id, symbol])
 
     def remove_symbol(self, symbol: str):
@@ -138,6 +163,7 @@ class QuoteSession:
         """
         self.__symbol_listeners.pop(symbol, None)
         self.__subscriptions.pop(symbol, None)
+        self.__pending_subscriptions.discard(symbol)
         self.__client['send']('quote_remove_symbols', [self.__session_id, symbol])
 
     def on_data_q(self, packet):
@@ -242,13 +268,8 @@ class QuoteSession:
             self.__client['send']('quote_set_fields', [self.__session_id] + [self.__fields])
 
     def _replay_subscriptions(self):
-        for symbol, opts in list(self.__subscriptions.items()):
-            payload = [self.__session_id, symbol]
-            if opts.get("force_permission"):
-                payload.append({"flags": ["force_permission"]})
-            self.__client['send']('quote_add_symbols', payload)
-            if opts.get("fast"):
-                self.__client['send']('quote_fast_symbols', [self.__session_id, symbol])
+        self.__pending_subscriptions.update(self.__subscriptions.keys())
+        self.flush_subscriptions()
 
     def recover_unknown_session(self):
         now = time.monotonic()
